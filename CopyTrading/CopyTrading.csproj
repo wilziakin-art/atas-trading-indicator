@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <AssemblyName>CopyTrading</AssemblyName>
+    <RootNamespace>CopyTrading</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <Optimize>true</Optimize>
+
+    <!-- Metadata DLL -->
+    <Company>CopyTrading</Company>
+    <Product>ATAS CopyTrading v2</Product>
+    <Description>Système de copy trading dual-canal pour ATAS — scalping NQ</Description>
+    <Version>2.0.0</Version>
+  </PropertyGroup>
+
+  <!-- Références ATAS SDK (chemin via variable d'environnement ou MSBuild property) -->
+  <ItemGroup>
+    <Reference Include="ATAS.Indicators">
+      <HintPath>$(ATASSdkPath)\ATAS.Indicators.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ATAS.DataFeedsCore">
+      <HintPath>$(ATASSdkPath)\ATAS.DataFeedsCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Core">
+      <HintPath>$(ATASSdkPath)\OFT.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="OFT.Rendering">
+      <HintPath>$(ATASSdkPath)\OFT.Rendering.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Packages NuGet (pas de dépendances ATAS, tout est local) -->
+  <ItemGroup>
+    <!-- MessagePack optionnel pour le protocole binaire si on veut évoluer -->
+    <!-- <PackageReference Include="MessagePack" Version="2.5.140" /> -->
+  </ItemGroup>
+
+  <!-- Tous les fichiers C# du projet CopyTrading -->
+  <ItemGroup>
+    <Compile Include="Protocol\TradingMessage.cs" />
+    <Compile Include="Protocol\CommMessage.cs" />
+    <Compile Include="RelayServer\RelayServer.cs" />
+    <Compile Include="ClientIndicator\RiskManager.cs" />
+    <Compile Include="ClientIndicator\ClientTradingEngine.cs" />
+    <Compile Include="ClientIndicator\ClientCommEngine.cs" />
+    <Compile Include="ClientIndicator\ClientIndicator.cs" />
+    <Compile Include="MasterIndicator\MasterIndicator.cs" />
+  </ItemGroup>
+
+  <!-- Dashboard HTML — copié dans le dossier de sortie -->
+  <ItemGroup>
+    <Content Include="Dashboard\index.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <!--
+    COMPILATION :
+      1. Définir la variable ATASSdkPath pointant vers le dossier ATAS :
+         Windows : set ATASSdkPath=C:\Program Files (x86)\ATAS Platform\Bin
+         ou dans Directory.Build.props : <ATASSdkPath>C:\Program Files (x86)\ATAS Platform\Bin</ATASSdkPath>
+
+      2. Compiler en Release :
+         dotnet build -c Release
+
+      3. Déployer :
+         - CopyTrading.dll  →  %APPDATA%\ATAS\Strategies\
+         - Dashboard/index.html  →  serveur web ou ouvert via navigateur
+
+    RELAY SERVER :
+      Le RelayServer.cs est une application console autonome.
+      Pour le déployer séparément sur VPS, créer un projet Console séparé
+      et y référencer uniquement Protocol/ + RelayServer/.
+  -->
+
+</Project>
