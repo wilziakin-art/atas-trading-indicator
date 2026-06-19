@@ -164,7 +164,10 @@ namespace CopyTrading.ClientIndicator
         private readonly ConcurrentQueue<Action> _pendingOrders = new();
 
         // Flatten différé si relay perdu
-        private long   _connexionPerduTs;
+        private long _connexionPerduTs;
+
+        // ── AMÉLIORATION 2 : Flatten atomique (Interlocked, pas de bool) ──
+        private int _flattenInProgress = 0; // 0=libre, 1=en cours
 
         // Message dashboard bannière
         private string   _dashboardMessage    = "";
@@ -569,12 +572,29 @@ namespace CopyTrading.ClientIndicator
 
         private void FlattenPositions(string reason)
         {
-            LogWarn($"[CLIENT] Flatten : {reason}");
-            CancelOrders();
-            ClosePositions();
+            // ── AMÉLIORATION 2 : Flatten atomique ──
+            // CompareExchange garantit qu'un seul flatten s'exécute à la fois
+            if (Interlocked.CompareExchange(ref _flattenInProgress, 1, 0) != 0)
+            {
+                LogWarn($"[CLIENT] Flatten déjà en cours — ignoré ({reason})");
+                return;
+            }
 
-            if (FlattenAuStopJour && !RepriseAutoCopie)
-                CopieActive = false;
+            try
+            {
+                LogWarn($"[CLIENT] Flatten : {reason}");
+                CancelOrders();
+                ClosePositions();
+
+                if (FlattenAuStopJour && !RepriseAutoCopie)
+                    CopieActive = false;
+            }
+            finally
+            {
+                // Libère après 500ms — laisse le temps à ATAS de traiter les ordres
+                Task.Delay(500).ContinueWith(_ =>
+                    Interlocked.Exchange(ref _flattenInProgress, 0));
+            }
         }
 
         // Ferme toutes les positions ouvertes (méthode ATAS native)

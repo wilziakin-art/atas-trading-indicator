@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -8,17 +9,14 @@ using CopyTrading.Protocol;
 
 namespace CopyTrading.ClientIndicator
 {
-    // Thread dédié TRADING — priorité AboveNormal, port 8765
-    // Responsabilité unique : recevoir les signaux binaires et les mettre en file de priorité
-    // Aucun lock partagé avec le canal COMM
-
     public enum SignalPriority { P0_Close = 0, P1_Entry = 1 }
 
     public class PrioritizedSignal
     {
-        public SignalPriority  Priority { get; set; }
-        public TradingMessage  Message  { get; set; }
-        public long            ReceivedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        public SignalPriority Priority   { get; set; }
+        public TradingMessage Message    { get; set; }
+        public long           ReceivedAt { get; set; } = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        public string         SignalId   { get; set; } // anti-doublon
     }
 
     public class ClientTradingConfig
@@ -29,18 +27,16 @@ namespace CopyTrading.ClientIndicator
         public string ClientId          { get; set; } = "client1";
         public string MasterIdToFollow  { get; set; } = "";
 
-        // Filtres d'entrée
-        public int    MaxSignalAgeMs    { get; set; } = 500;   // signal périmé si > 500ms
+        public int    MaxSignalAgeMs    { get; set; } = 500;
         public int    MaxSpreadTicks    { get; set; } = 4;
-        public int    MaxLotsTotal      { get; set; } = 2;     // contrats max en position simultanée
+        public int    MaxLotsTotal      { get; set; } = 2;
         public int    MaxLotsPerTrade   { get; set; } = 10;
-
-        // Multiplicateur volume
         public double VolumeMultiplier  { get; set; } = 1.0;
 
-        // Reconnexion
-        public int    ReconnectMs       { get; set; } = 2000;  // 2s entre tentatives
-        public int    HeartbeatTimeoutS { get; set; } = 15;    // flatten si silence > 15s
+        public int    ReconnectMs           { get; set; } = 2000;
+        public int    HeartbeatTimeoutS     { get; set; } = 15;
+        public int    CloseDebounceMs       { get; set; } = 450;  // debounce CLOSE_ALL (Veloxas)
+        public int    DoneExecIdsMaxSize    { get; set; } = 500;  // taille max du cache anti-doublon
     }
 
     public class ClientTradingEngine
@@ -49,31 +45,39 @@ namespace CopyTrading.ClientIndicator
         private readonly byte[]              _secretKey;
         private readonly RiskManager         _risk;
 
-        // File de priorité : P0 (CLOSE) toujours avant P1 (ENTRY)
-        // On utilise deux queues distinctes pour éviter tout overhead de tri
-        private readonly ConcurrentQueue<PrioritizedSignal> _p0Queue = new();
-        private readonly ConcurrentQueue<PrioritizedSignal> _p1Queue = new();
-        private readonly SemaphoreSlim _queueSignal = new(0, int.MaxValue);
+        // File de priorité P0 (CLOSE) / P1 (ENTRY)
+        private readonly ConcurrentQueue<PrioritizedSignal> _p0Queue    = new();
+        private readonly ConcurrentQueue<PrioritizedSignal> _p1Queue    = new();
+        private readonly SemaphoreSlim                      _queueSignal = new(0, int.MaxValue);
 
-        private TcpClient       _tcp;
-        private NetworkStream   _stream;
-        private Thread          _receiveThread;
-        private Thread          _dispatchThread;
-        private volatile bool   _connected;
-        private volatile bool   _running;
-        private long            _lastHeartbeatMs;
+        // ── AMÉLIORATION 1 : Anti-doublon (inspiré Veloxas _doneExecIds) ──
+        // HashSet des SignalId déjà exécutés + Queue FIFO pour purge LIFO
+        private readonly HashSet<string>  _doneExecIds   = new(StringComparer.Ordinal);
+        private readonly Queue<string>    _doneExecOrder = new();
+        private readonly object           _doneExecGate  = new();
+
+        // ── AMÉLIORATION 2 : Flatten atomique (inspiré Veloxas _flattenInProgress) ──
+        // int32 géré via Interlocked.CompareExchange — évite les doubles flatten simultanés
+        private int  _flattenInProgress = 0; // 0=libre, 1=en cours
+
+        // ── AMÉLIORATION 3 : Debounce CLOSE_ALL ──
+        private long _lastCloseReceivedTicks = 0;
+
+        private TcpClient     _tcp;
+        private NetworkStream _stream;
+        private Thread        _dispatchThread;
+        private volatile bool _connected;
+        private volatile bool _running;
+        private long          _lastHeartbeatMs;
         private readonly CancellationTokenSource _cts = new();
 
-        // Callback vers ATAS pour exécuter réellement les ordres
-        // Implémenté dans ClientIndicator.cs qui a accès à l'API ATAS
-        public Action<TradingMessage> OnExecuteEntry   { get; set; }
-        public Action<TradingMessage> OnExecuteClose   { get; set; }
-        public Action<string>         OnConnectionLost { get; set; }  // déclenche flatten
-        public Action<long>           OnLatencyMeasured{ get; set; }  // ping/pong ms
+        public Action<TradingMessage> OnExecuteEntry    { get; set; }
+        public Action<TradingMessage> OnExecuteClose    { get; set; }
+        public Action<string>         OnConnectionLost  { get; set; }
+        public Action<long>           OnLatencyMeasured { get; set; }
 
-        // Getter pour l'overlay — appelé depuis le thread UI, lecture atomique
-        public bool  IsConnected    => _connected;
-        public int   PendingSignals => _p0Queue.Count + _p1Queue.Count;
+        public bool IsConnected    => _connected;
+        public int  PendingSignals => _p0Queue.Count + _p1Queue.Count;
 
         public ClientTradingEngine(ClientTradingConfig cfg, RiskManager risk)
         {
@@ -116,24 +120,23 @@ namespace CopyTrading.ClientIndicator
             {
                 try
                 {
-                    _tcp    = new TcpClient();
-                    _tcp.NoDelay           = true;
-                    _tcp.SendBufferSize    = 8192;
-                    _tcp.ReceiveBufferSize = 8192;
+                    _tcp = new TcpClient
+                    {
+                        NoDelay           = true,
+                        SendBufferSize    = 8192,
+                        ReceiveBufferSize = 8192
+                    };
 
                     await _tcp.ConnectAsync(_cfg.RelayHost, _cfg.RelayTradingPort);
-
                     _stream = _tcp.GetStream();
 
-                    // Handshake
                     var header = Encoding.ASCII.GetBytes($"CLIENT:{_cfg.ClientId}\n");
                     await _stream.WriteAsync(header, 0, header.Length);
 
-                    _connected        = true;
-                    _lastHeartbeatMs  = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    _connected       = true;
+                    _lastHeartbeatMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
                     Console.WriteLine($"[TRADING-ENGINE] Connecté à {_cfg.RelayHost}:{_cfg.RelayTradingPort}");
-
                     await ReceiveLoop();
                 }
                 catch (Exception ex)
@@ -144,7 +147,7 @@ namespace CopyTrading.ClientIndicator
                 {
                     _connected = false;
                     _tcp?.Close();
-                    OnConnectionLost?.Invoke("Relay trading perdu");
+                    TriggerConnectionLost("Relay trading perdu");
                 }
 
                 if (_running)
@@ -187,13 +190,35 @@ namespace CopyTrading.ClientIndicator
 
         private void EnqueueSignal(TradingMessage msg)
         {
-            if (msg.Type == MessageType.Heartbeat)
-                return;
+            if (msg.Type == MessageType.Heartbeat) return;
 
-            var signal = new PrioritizedSignal { Message = msg };
+            // Génère un ID unique par signal : masterId + timestamp + type
+            string signalId = $"{msg.GetMasterId()}_{msg.TimestampMs}_{msg.Type}";
+
+            var signal = new PrioritizedSignal
+            {
+                Message  = msg,
+                SignalId = signalId,
+            };
 
             if (msg.Type == MessageType.CloseAll || msg.Type == MessageType.ClosePartial)
             {
+                // ── AMÉLIORATION 3 : Debounce CLOSE_ALL ──
+                // Si un CLOSE_ALL a déjà été reçu il y a moins de CloseDebounceMs, on ignore
+                long now      = DateTime.UtcNow.Ticks;
+                long lastTick = Interlocked.Read(ref _lastCloseReceivedTicks);
+
+                if (lastTick > 0)
+                {
+                    long elapsedMs = (now - lastTick) / TimeSpan.TicksPerMillisecond;
+                    if (elapsedMs < _cfg.CloseDebounceMs)
+                    {
+                        Console.WriteLine($"[DISPATCH] CLOSE_ALL debounce ({elapsedMs}ms < {_cfg.CloseDebounceMs}ms) — ignoré");
+                        return;
+                    }
+                }
+
+                Interlocked.Exchange(ref _lastCloseReceivedTicks, now);
                 signal.Priority = SignalPriority.P0_Close;
                 _p0Queue.Enqueue(signal);
             }
@@ -207,7 +232,7 @@ namespace CopyTrading.ClientIndicator
         }
 
         // ────────────────────────────────────────────────────────────────
-        // DISPATCH — thread AboveNormal, draine les files dans l'ordre P0→P1
+        // DISPATCH — thread AboveNormal, draine P0 avant P1
         // ────────────────────────────────────────────────────────────────
 
         private void DispatchLoop()
@@ -216,63 +241,129 @@ namespace CopyTrading.ClientIndicator
             {
                 _queueSignal.Wait();
 
-                // P0 toujours en premier
                 if (_p0Queue.TryDequeue(out var close))
                 {
-                    ExecuteClose(close.Message);
+                    ExecuteClose(close);
                     continue;
                 }
 
                 if (_p1Queue.TryDequeue(out var entry))
-                {
                     TryExecuteEntry(entry);
-                }
             }
         }
 
-        private void ExecuteClose(TradingMessage msg)
+        private void ExecuteClose(PrioritizedSignal signal)
         {
-            // CLOSE_ALL bypass absolu — aucune validation, aucun risk manager check
-            Console.WriteLine($"[DISPATCH] P0 CLOSE_ALL reçu — exécution immédiate");
-            try { OnExecuteClose?.Invoke(msg); }
-            catch (Exception ex) { Console.WriteLine($"[DISPATCH] Erreur CLOSE : {ex.Message}"); }
+            // ── AMÉLIORATION 2 : Flatten atomique ──
+            // CompareExchange garantit qu'un seul thread entre dans le flatten
+            if (Interlocked.CompareExchange(ref _flattenInProgress, 1, 0) != 0)
+            {
+                Console.WriteLine("[DISPATCH] Flatten déjà en cours — CLOSE_ALL ignoré (doublon)");
+                return;
+            }
+
+            try
+            {
+                Console.WriteLine("[DISPATCH] P0 CLOSE_ALL — exécution immédiate");
+                OnExecuteClose?.Invoke(signal.Message);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[DISPATCH] Erreur CLOSE : {ex.Message}");
+            }
+            finally
+            {
+                // Libère le flag après exécution (avec délai court pour éviter rebond)
+                Task.Delay(200).ContinueWith(_ =>
+                    Interlocked.Exchange(ref _flattenInProgress, 0));
+            }
         }
 
         private void TryExecuteEntry(PrioritizedSignal signal)
         {
             var msg = signal.Message;
 
-            // 1. Filtre âge du signal
+            // ── AMÉLIORATION 1 : Anti-doublon ──
+            if (IsAlreadyExecuted(signal.SignalId))
+            {
+                Console.WriteLine($"[DISPATCH] Signal {signal.SignalId} déjà exécuté — ignoré");
+                return;
+            }
+
+            // Filtre âge
             long ageMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - signal.ReceivedAt;
             if (ageMs > _cfg.MaxSignalAgeMs)
             {
-                Console.WriteLine($"[DISPATCH] Signal trop vieux ({ageMs}ms > {_cfg.MaxSignalAgeMs}ms) — ignoré");
+                Console.WriteLine($"[DISPATCH] Signal trop vieux ({ageMs}ms) — ignoré");
                 return;
             }
 
-            // 2. Risk manager
+            // Risk manager
             if (!_risk.PeutEntrer)
             {
-                Console.WriteLine($"[DISPATCH] Risk manager bloqué ({_risk.State}) — entrée refusée");
+                Console.WriteLine($"[DISPATCH] Risk manager bloqué ({_risk.State}) — refusé");
                 return;
             }
 
-            // 3. Volume calculé
+            // Marque comme exécuté AVANT l'envoi (évite doublon si callback lent)
+            MarkExecuted(signal.SignalId);
+
             int volume = (int)Math.Max(1, Math.Round(msg.Volume * _cfg.VolumeMultiplier));
             volume     = Math.Min(volume, _cfg.MaxLotsPerTrade);
 
-            // 4. Exécution — les vérifications spread/position sont faites dans ClientIndicator
-            //    qui a accès au contexte ATAS (bid/ask temps réel, positions ouvertes)
-            var adjustedMsg = msg;
-            // Note : on passe le message tel quel, le callback ATAS ajuste le volume
-
-            Console.WriteLine($"[DISPATCH] P1 ENTRY {msg.Direction} {msg.GetSymbol()} vol={volume} prix={msg.Price}");
-            try { OnExecuteEntry?.Invoke(adjustedMsg); }
+            Console.WriteLine($"[DISPATCH] P1 ENTRY {msg.Direction} {msg.GetSymbol()} vol={volume} @ {msg.Price}");
+            try { OnExecuteEntry?.Invoke(msg); }
             catch (Exception ex) { Console.WriteLine($"[DISPATCH] Erreur ENTRY : {ex.Message}"); }
         }
 
         // ────────────────────────────────────────────────────────────────
-        // HEARTBEAT WATCHDOG — flatten si silence > HeartbeatTimeoutS
+        // ANTI-DOUBLON — HashSet borné + Queue FIFO pour purge
+        // ────────────────────────────────────────────────────────────────
+
+        private bool IsAlreadyExecuted(string signalId)
+        {
+            lock (_doneExecGate)
+                return _doneExecIds.Contains(signalId);
+        }
+
+        private void MarkExecuted(string signalId)
+        {
+            lock (_doneExecGate)
+            {
+                if (_doneExecIds.Add(signalId))
+                {
+                    _doneExecOrder.Enqueue(signalId);
+
+                    // Purge FIFO si dépasse la taille max
+                    while (_doneExecOrder.Count > _cfg.DoneExecIdsMaxSize)
+                    {
+                        var old = _doneExecOrder.Dequeue();
+                        _doneExecIds.Remove(old);
+                    }
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────────────────────
+        // CONNEXION PERDUE — déclenché une seule fois via Interlocked
+        // ────────────────────────────────────────────────────────────────
+
+        private int _connectionLostFired = 0;
+
+        private void TriggerConnectionLost(string reason)
+        {
+            // Garantit que OnConnectionLost n'est déclenché qu'une fois par déconnexion
+            if (Interlocked.CompareExchange(ref _connectionLostFired, 1, 0) == 0)
+            {
+                OnConnectionLost?.Invoke(reason);
+                // Reset après 3s pour permettre le prochain cycle
+                Task.Delay(3000).ContinueWith(_ =>
+                    Interlocked.Exchange(ref _connectionLostFired, 0));
+            }
+        }
+
+        // ────────────────────────────────────────────────────────────────
+        // HEARTBEAT WATCHDOG
         // ────────────────────────────────────────────────────────────────
 
         private async Task HeartbeatWatchdog()
@@ -280,15 +371,14 @@ namespace CopyTrading.ClientIndicator
             while (!_cts.Token.IsCancellationRequested)
             {
                 await Task.Delay(5000, _cts.Token).ConfigureAwait(false);
-
                 if (!_connected) continue;
 
                 var silenceMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _lastHeartbeatMs;
                 if (silenceMs > _cfg.HeartbeatTimeoutS * 1000L)
                 {
-                    Console.WriteLine($"[WATCHDOG] Silence relay {silenceMs}ms — flatten déclenché");
-                    OnConnectionLost?.Invoke($"Timeout relay ({silenceMs}ms sans activité)");
-                    _tcp?.Close(); // force reconnexion
+                    Console.WriteLine($"[WATCHDOG] Silence {silenceMs}ms — flatten + reconnexion");
+                    TriggerConnectionLost($"Timeout relay ({silenceMs}ms sans activité)");
+                    _tcp?.Close();
                 }
             }
         }
