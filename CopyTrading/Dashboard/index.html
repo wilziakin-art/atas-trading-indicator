@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CopyTrading — Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; color: #c9d1d9; font-family: 'Courier New', monospace; font-size: 14px; }
+
+    header {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { color: #58a6ff; font-size: 18px; }
+    #relay-status { font-size: 13px; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+    .dot.green { background: #3fb950; }
+    .dot.red   { background: #f85149; }
+
+    main { padding: 20px 24px; }
+
+    /* ── Alertes ── */
+    #alerts { margin-bottom: 16px; }
+    .alert {
+      background: #3d1f00;
+      border: 1px solid #f0883e;
+      color: #f0883e;
+      padding: 8px 14px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      font-weight: bold;
+    }
+
+    /* ── Tableau clients ── */
+    table { width: 100%; border-collapse: collapse; margin-bottom: 28px; }
+    th {
+      background: #161b22;
+      color: #8b949e;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 8px 12px;
+      border-bottom: 1px solid #30363d;
+      text-align: left;
+    }
+    td { padding: 9px 12px; border-bottom: 1px solid #21262d; vertical-align: middle; }
+    tr:hover td { background: #161b22; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: bold;
+    }
+    .badge.actif      { background: #1f6feb; color: #fff; }
+    .badge.breakeven  { background: #388bfd22; color: #79c0ff; border: 1px solid #388bfd; }
+    .badge.pause      { background: #bb800926; color: #d29922; border: 1px solid #d29922; }
+    .badge.stop       { background: #f8514926; color: #f85149; border: 1px solid #f85149; }
+
+    .pnl-pos { color: #3fb950; }
+    .pnl-neg { color: #f85149; }
+    .pnl-neu { color: #8b949e; }
+
+    /* ── Messagerie ── */
+    .msg-panel {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    .msg-panel h2 { color: #58a6ff; font-size: 14px; margin-bottom: 12px; }
+    .msg-panel .row { display: flex; gap: 8px; margin-bottom: 8px; }
+    .msg-panel select, .msg-panel input, .msg-panel textarea {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+    .msg-panel select { width: 160px; }
+    .msg-panel input[type=number] { width: 80px; }
+    .msg-panel textarea { width: 100%; height: 60px; resize: vertical; }
+    .msg-panel button {
+      background: #238636;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 7px 18px;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: bold;
+    }
+    .msg-panel button:hover { background: #2ea043; }
+
+    /* ── Historique ── */
+    .history-panel {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .history-panel h2 { color: #58a6ff; font-size: 14px; margin-bottom: 12px; }
+
+    footer {
+      text-align: center;
+      color: #30363d;
+      font-size: 11px;
+      padding: 16px;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ CopyTrading Dashboard</h1>
+  <div id="relay-status"><span class="dot red" id="relay-dot"></span><span id="relay-label">Déconnecté</span></div>
+</header>
+
+<main>
+
+  <!-- Alertes -->
+  <div id="alerts"></div>
+
+  <!-- Tableau clients -->
+  <table id="clients-table">
+    <thead>
+      <tr>
+        <th>Client</th>
+        <th>Statut</th>
+        <th>PnL Jour</th>
+        <th>Trades</th>
+        <th>Wins</th>
+        <th>Pertes consec.</th>
+        <th>Latence</th>
+        <th>Dernier trade</th>
+      </tr>
+    </thead>
+    <tbody id="clients-body">
+      <tr><td colspan="8" style="color:#8b949e;text-align:center;padding:24px">En attente de données…</td></tr>
+    </tbody>
+  </table>
+
+  <!-- Messagerie dashboard → client -->
+  <div class="msg-panel">
+    <h2>📢 Envoyer un message aux clients</h2>
+    <div class="row">
+      <select id="msg-target">
+        <option value="">Tous les clients</option>
+      </select>
+      <input type="number" id="msg-duration" value="180" min="10" max="3600" title="Durée affichage (s)">
+      <span style="align-self:center;color:#8b949e;font-size:12px">sec</span>
+    </div>
+    <div class="row">
+      <textarea id="msg-text" placeholder="Message à afficher sur le panneau ATAS du client…"></textarea>
+    </div>
+    <div class="row">
+      <button onclick="sendMessage()">Envoyer</button>
+      <span id="msg-status" style="align-self:center;margin-left:12px;font-size:12px;color:#8b949e"></span>
+    </div>
+  </div>
+
+  <!-- Historique 50 derniers trades -->
+  <div class="history-panel">
+    <h2>📋 Historique des 50 derniers trades (maître)</h2>
+    <table>
+      <thead>
+        <tr><th>Heure</th><th>Symbole</th><th>Direction</th><th>Volume</th><th>Prix entrée</th><th>PnL</th></tr>
+      </thead>
+      <tbody id="history-body">
+        <tr><td colspan="6" style="color:#8b949e;text-align:center;padding:16px">Aucun historique</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</main>
+
+<footer>CopyTrading v2 — Canal COMM uniquement (port 8766) — Isolation physique du trading garantie</footer>
+
+<script>
+  const RELAY_WS   = `ws://${location.hostname}:8766/`;
+  const RELAY_API  = `http://${location.hostname}:8080/api`;
+
+  let ws        = null;
+  let clients   = {};
+  let reconnect = null;
+
+  // ── WebSocket COMM ──────────────────────────────────────────────────
+
+  function connect() {
+    ws = new WebSocket(RELAY_WS);
+
+    ws.onopen = () => {
+      setRelayStatus(true);
+      clearTimeout(reconnect);
+      console.log('[WS] Connecté au canal COMM');
+    };
+
+    ws.onmessage = e => {
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'ClientStatus' && msg.payload)
+          updateClient(msg.payload);
+      } catch(err) {
+        console.warn('[WS] Parse error', err);
+      }
+    };
+
+    ws.onclose = ws.onerror = () => {
+      setRelayStatus(false);
+      reconnect = setTimeout(connect, 3000);
+    };
+  }
+
+  function setRelayStatus(ok) {
+    document.getElementById('relay-dot').className   = `dot ${ok ? 'green' : 'red'}`;
+    document.getElementById('relay-label').textContent = ok ? 'Connecté' : 'Déconnecté';
+  }
+
+  // ── Mise à jour tableau clients ─────────────────────────────────────
+
+  function updateClient(stats) {
+    clients[stats.clientId] = stats;
+    renderClients();
+    renderAlerts();
+    updateMsgTargets();
+  }
+
+  function renderClients() {
+    const tbody = document.getElementById('clients-body');
+    const rows  = Object.values(clients);
+
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="8" style="color:#8b949e;text-align:center;padding:24px">Aucun client connecté</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = rows.map(s => {
+      const stateKey = (s.status || '').toLowerCase().replace(/[_\-\s]/g, '');
+      const badge    = stateKey.startsWith('stop') ? 'stop'
+                     : stateKey === 'pause' || stateKey === 'pauseconseclose' ? 'pause'
+                     : stateKey === 'breakeven' ? 'breakeven' : 'actif';
+
+      const pnlCls = s.pnlDay > 0 ? 'pnl-pos' : s.pnlDay < 0 ? 'pnl-neg' : 'pnl-neu';
+      const pnlStr = `${s.pnlDay >= 0 ? '+' : ''}${(s.pnlDay || 0).toFixed(2)} $`;
+
+      const lastTrade = s.lastTradeDir
+        ? `${s.lastTradeDir} ${s.lastTradeSymbol || ''} ${s.lastTradePnl >= 0 ? '+' : ''}${(s.lastTradePnl || 0).toFixed(2)}$`
+        : '—';
+
+      return `<tr>
+        <td><strong>${s.clientId}</strong></td>
+        <td><span class="badge ${badge}">${s.status || '?'}</span></td>
+        <td class="${pnlCls}"><strong>${pnlStr}</strong></td>
+        <td>${s.tradesDay || 0}</td>
+        <td>${s.winsDay || 0}</td>
+        <td style="color:${(s.consecLosses||0) > 0 ? '#f0883e' : 'inherit'}">${s.consecLosses || 0}</td>
+        <td>${s.latencyMs || 0} ms</td>
+        <td style="font-size:12px;color:#8b949e">${lastTrade}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderAlerts() {
+    const div = document.getElementById('alerts');
+    const alerts = [];
+
+    Object.values(clients).forEach(s => {
+      if ((s.status || '').toLowerCase().startsWith('stop'))
+        alerts.push(`⚠️ ${s.clientId} — ${s.status} (PnL: ${(s.pnlDay||0).toFixed(2)}$)`);
+    });
+
+    div.innerHTML = alerts.map(a => `<div class="alert">${a}</div>`).join('');
+  }
+
+  function updateMsgTargets() {
+    const sel = document.getElementById('msg-target');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">Tous les clients</option>'
+      + Object.keys(clients).map(id => `<option value="${id}">${id}</option>`).join('');
+    sel.value = current;
+  }
+
+  // ── Messagerie ──────────────────────────────────────────────────────
+
+  function sendMessage() {
+    const text     = document.getElementById('msg-text').value.trim();
+    const target   = document.getElementById('msg-target').value;
+    const duration = parseInt(document.getElementById('msg-duration').value) || 180;
+    const status   = document.getElementById('msg-status');
+
+    if (!text) { status.textContent = 'Message vide.'; return; }
+    if (!ws || ws.readyState !== WebSocket.OPEN) { status.textContent = 'Non connecté au relay.'; return; }
+
+    const msg = {
+      type: 'DashboardMessage',
+      timestamp: Date.now(),
+      payload: { targetClientId: target || null, text, durationSec: duration }
+    };
+
+    ws.send(JSON.stringify(msg));
+    document.getElementById('msg-text').value = '';
+    status.textContent = `✓ Envoyé à ${target || 'tous'} (${duration}s)`;
+    setTimeout(() => status.textContent = '', 4000);
+  }
+
+  // ── Historique (polling REST toutes les 10s) ─────────────────────────
+
+  async function fetchHistory() {
+    try {
+      const res  = await fetch(`${RELAY_API}/history`);
+      const data = await res.json();
+      renderHistory(data);
+    } catch { /* relay non accessible */ }
+  }
+
+  function renderHistory(trades) {
+    const tbody = document.getElementById('history-body');
+    if (!trades || !trades.length) return;
+
+    tbody.innerHTML = trades.slice().reverse().map(t => {
+      const ts  = new Date(t.timestampMs).toLocaleTimeString('fr-FR');
+      const dir = t.direction === 'Buy' ? '🟢 BUY' : '🔴 SELL';
+      const pnl = t.pnlUsd != null
+        ? `<span class="${t.pnlUsd >= 0 ? 'pnl-pos' : 'pnl-neg'}">${t.pnlUsd >= 0 ? '+' : ''}${t.pnlUsd.toFixed(2)} $</span>`
+        : '—';
+      return `<tr>
+        <td>${ts}</td>
+        <td>${t.symbol || '—'}</td>
+        <td>${dir}</td>
+        <td>${t.volume}</td>
+        <td>${t.entryPrice}</td>
+        <td>${pnl}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ── Init ─────────────────────────────────────────────────────────────
+
+  connect();
+  fetchHistory();
+  setInterval(fetchHistory, 10000);
+</script>
+
+</body>
+</html>
