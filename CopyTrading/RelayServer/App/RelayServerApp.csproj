@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>CopyTradingRelay</AssemblyName>
+    <RootNamespace>CopyTrading.RelayServer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <Optimize>true</Optimize>
+    <SelfContained>false</SelfContained>
+
+    <Company>CopyTrading</Company>
+    <Product>ATAS CopyTrading Relay v2</Product>
+    <Description>Relay Server dual-canal — déployable sur VPS Linux/Windows</Description>
+    <Version>2.0.0</Version>
+  </PropertyGroup>
+
+  <!--
+    COMPILATION :
+      dotnet build -c Release
+      dotnet publish -c Release -r linux-x64 --self-contained false -o ./publish/linux
+      dotnet publish -c Release -r win-x64   --self-contained false -o ./publish/win
+
+    DÉPLOIEMENT VPS LINUX (systemd) :
+      1. Copier ./publish/linux/ sur le VPS
+      2. Copier relay.json dans le même dossier
+      3. Installer le service : voir relay.service ci-dessous
+      4. systemctl enable --now copytrading-relay
+
+    DÉPLOIEMENT VPS WINDOWS (NSSM) :
+      nssm install CopyTradingRelay "C:\relay\CopyTradingRelay.exe"
+      nssm set CopyTradingRelay AppDirectory "C:\relay"
+      nssm start CopyTradingRelay
+  -->
+
+  <ItemGroup>
+    <!-- Partage le protocole et le relay avec le projet principal -->
+    <Compile Include="..\RelayServer.cs" />
+    <Compile Include="..\..\Protocol\TradingMessage.cs" />
+    <Compile Include="..\..\Protocol\CommMessage.cs" />
+    <Compile Include="Program.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="relay.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="relay.service">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

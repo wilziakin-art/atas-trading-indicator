@@ -1,0 +1,6 @@
+{
+  "TradingPort": 8765,
+  "CommPort": 8766,
+  "DashboardPort": 8080,
+  "SecretKey": "changeme"
+}

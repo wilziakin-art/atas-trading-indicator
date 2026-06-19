@@ -42,6 +42,13 @@ namespace CopyTrading.RelayServer
 
         private volatile bool _running;
         private readonly CancellationTokenSource _cts = new();
+        private long _totalTradesRelayed = 0;
+
+        // ── Propriétés publiques pour la console ──────────────────────────
+        public int  TradingClientCount  => _tradingClients.Count;
+        public int  CommClientCount     => _commClients.Count;
+        public long TotalTradesRelayed  => Interlocked.Read(ref _totalTradesRelayed);
+        public int  TradeHistoryCount   => _tradeHistory.Count;
 
         public RelayServer(RelayConfig config)
         {
@@ -187,6 +194,8 @@ namespace CopyTrading.RelayServer
                 }
 
                 if (msg.Type == MessageType.Heartbeat) continue;
+
+                Interlocked.Increment(ref _totalTradesRelayed);
 
                 // Broadcast non-bloquant — un client lent n'impacte jamais les autres
                 var snapshot = _tradingClients.ToArray();

@@ -1,0 +1,23 @@
+[Unit]
+Description=CopyTrading Relay Server v2
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay
+WorkingDirectory=/opt/copytrading-relay
+ExecStart=/usr/bin/dotnet /opt/copytrading-relay/CopyTradingRelay.dll
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=copytrading-relay
+
+# Sécurité minimale
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
