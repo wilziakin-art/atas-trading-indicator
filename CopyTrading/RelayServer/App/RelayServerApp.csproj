@@ -16,30 +16,13 @@
     <Version>2.0.0</Version>
   </PropertyGroup>
 
-  <!--
-    COMPILATION :
-      dotnet build -c Release
-      dotnet publish -c Release -r linux-x64 --self-contained false -o ./publish/linux
-      dotnet publish -c Release -r win-x64   --self-contained false -o ./publish/win
-
-    DÉPLOIEMENT VPS LINUX (systemd) :
-      1. Copier ./publish/linux/ sur le VPS
-      2. Copier relay.json dans le même dossier
-      3. Installer le service : voir relay.service ci-dessous
-      4. systemctl enable --now copytrading-relay
-
-    DÉPLOIEMENT VPS WINDOWS (NSSM) :
-      nssm install CopyTradingRelay "C:\relay\CopyTradingRelay.exe"
-      nssm set CopyTradingRelay AppDirectory "C:\relay"
-      nssm start CopyTradingRelay
-  -->
+  <!-- Voir relay.service pour le deploiement Linux systemd -->
 
   <ItemGroup>
     <!-- Partage le protocole et le relay avec le projet principal -->
     <Compile Include="..\RelayServer.cs" />
     <Compile Include="..\..\Protocol\TradingMessage.cs" />
     <Compile Include="..\..\Protocol\CommMessage.cs" />
-    <Compile Include="Program.cs" />
   </ItemGroup>
 
   <ItemGroup>
