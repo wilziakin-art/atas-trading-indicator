@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 using OFT.Attributes;
@@ -11,7 +12,8 @@ using CopyTrading.Protocol;
 namespace CopyTrading.ClientIndicator
 {
     [DisplayName("CopyTrading — Client v2")]
-    public class ClientIndicator : Indicator
+    [Category("CopyTrading")]
+    public class ClientIndicator : ChartStrategy
     {
         // ────────────────────────────────────────────────────────────────
         // PARAMÈTRES ATAS (section 5 du document technique)
@@ -115,7 +117,7 @@ namespace CopyTrading.ClientIndicator
         public bool FlattenAuStopJour { get; set; } = true;
 
         [Display(Name = "Maître flat = client flat", GroupName = "Risk Manager", Order = 37)]
-        public bool MaiterFlatClientFlat { get; set; } = true;
+        public bool MaitreFlatClientFlat { get; set; } = true;
 
         [Display(Name = "Flatten si relay perdu", GroupName = "Risk Manager", Order = 38)]
         public bool FlattenSiRelayPerdu { get; set; } = true;
@@ -154,19 +156,30 @@ namespace CopyTrading.ClientIndicator
         // ÉTAT INTERNE
         // ────────────────────────────────────────────────────────────────
 
-        private RiskManager          _riskManager;
-        private ClientTradingEngine  _tradingEngine;
-        private ClientCommEngine     _commEngine;
+        private RiskManager         _riskManager;
+        private ClientTradingEngine _tradingEngine;
+        private ClientCommEngine    _commEngine;
 
-        private volatile bool        _flattenPending;
-        private string               _dashboardMessage    = "";
-        private DateTime             _dashboardMessageExp = DateTime.MinValue;
-        private long                 _connexionPerduTs    = 0;
-        private volatile bool        _initialise;
+        // Ordres TP/SL en attente de placement (posés dans OnMyTrade)
+        private readonly ConcurrentQueue<Action> _pendingOrders = new();
+
+        // Flatten différé si relay perdu
+        private long   _connexionPerduTs;
+
+        // Message dashboard bannière
+        private string   _dashboardMessage    = "";
+        private DateTime _dashboardMessageExp = DateTime.MinValue;
+
+        // Suivi breakeven position (par direction d'entrée)
+        private decimal _breakevenActivatedAt;
+        private bool    _breakevenDone;
+
+        // ────────────────────────────────────────────────────────────────
+        // CYCLE DE VIE ATAS
+        // ────────────────────────────────────────────────────────────────
 
         protected override void OnInitialize()
         {
-            // Risk Manager
             _riskManager = new RiskManager(new RiskManagerConfig
             {
                 TargetJourUsd        = TargetJourUsd,
@@ -177,7 +190,6 @@ namespace CopyTrading.ClientIndicator
                 HeureReset           = TimeSpan.FromHours(HeureResetUtc),
             });
 
-            // Trading Engine
             _tradingEngine = new ClientTradingEngine(new ClientTradingConfig
             {
                 RelayHost        = RelayHost,
@@ -194,11 +206,10 @@ namespace CopyTrading.ClientIndicator
                 HeartbeatTimeoutS= TimeoutPingRelayS,
             }, _riskManager);
 
-            _tradingEngine.OnExecuteEntry    = OnExecuteEntry;
-            _tradingEngine.OnExecuteClose    = OnExecuteClose;
-            _tradingEngine.OnConnectionLost  = OnConnectionLost;
+            _tradingEngine.OnExecuteEntry   = OnSignalEntry;
+            _tradingEngine.OnExecuteClose   = OnSignalClose;
+            _tradingEngine.OnConnectionLost = OnConnectionLost;
 
-            // Comm Engine
             _commEngine = new ClientCommEngine(new ClientCommConfig
             {
                 RelayHost     = RelayHost,
@@ -213,31 +224,46 @@ namespace CopyTrading.ClientIndicator
                 _dashboardMessageExp = DateTime.UtcNow.AddSeconds(dur);
             };
 
-            _commEngine.GetStats = () => new ClientStatsPayload
-            {
-                ClientId = ClientId,
-            };
+            _commEngine.GetStats = () => new ClientStatsPayload { ClientId = ClientId };
 
             if (CopieActive)
             {
                 _tradingEngine.Start();
                 _commEngine.Start();
             }
-
-            _initialise = true;
         }
 
-        protected override void OnStopped()
+        // Appelé par ATAS à l'arrêt propre de la stratégie
+        protected override void OnStopping()
         {
             _tradingEngine?.Stop();
             _commEngine?.Stop();
+
+            // Annule tous les ordres en attente et ferme les positions
+            CancelOrders();
+            ClosePositions();
         }
 
         protected override void OnCalculate(int bar, decimal value)
         {
-            if (bar != CurrentBar - 1) return;
+            if (!CanProcess || bar != CurrentBar - 1) return;
 
-            // Vérification flatten différé si relay perdu
+            // Mise à jour PnL temps réel dans le risk manager
+            if (TradingManager != null)
+            {
+                double pnlJour = (double)(TradingManager.RealizedPnl + TradingManager.UnrealizedPnl);
+                _riskManager.OnPnlUpdate(pnlJour);
+
+                // Flatten automatique si risk manager passe en STOP
+                var state = _riskManager.State;
+                if (FlattenAuStopJour &&
+                    (state == RiskState.StopLoss || state == RiskState.StopTarget))
+                {
+                    FlattenPositions($"Risk manager : {state}");
+                }
+            }
+
+            // Flatten différé si relay perdu
             if (_connexionPerduTs > 0)
             {
                 long silenceMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _connexionPerduTs;
@@ -248,57 +274,93 @@ namespace CopyTrading.ClientIndicator
                 }
             }
 
-            // Mise à jour PnL en temps réel dans le risk manager
-            // (TradingStatistics.RealizedPnl accessible via l'API ATAS)
+            // Gestion breakeven position sur barre courante
+            if (BreakevenPositionTicks > 0 && !_breakevenDone)
+                CheckBreakevenPosition();
+
+            // Pose des ordres TP/SL en attente (thread-safe depuis OnMyTrade)
+            while (_pendingOrders.TryDequeue(out var action))
+            {
+                try { action(); }
+                catch (Exception ex) { LogError($"[CLIENT] Erreur pose ordre : {ex.Message}"); }
+            }
         }
 
         // ────────────────────────────────────────────────────────────────
-        // EXÉCUTION ORDRES (callbacks depuis le trading engine)
+        // SIGNAUX REÇUS DU RELAY (callbacks depuis le trading engine)
+        // Ces callbacks arrivent depuis un thread externe — ATAS exige
+        // que les ordres soient posés depuis le thread OnCalculate.
+        // On utilise donc _pendingOrders pour différer l'exécution.
         // ────────────────────────────────────────────────────────────────
 
-        private void OnExecuteEntry(TradingMessage msg)
+        private void OnSignalEntry(TradingMessage msg)
         {
             if (!CopieActive) return;
 
-            // Vérification spread (accès bid/ask via l'API ATAS)
-            // var spread = (Ask - Bid) / InstrumentInfo.TickSize;
-            // if (spread > MaxSpreadTicks) return;
-
-            // Vérification position ouverte max
-            // if (OpenPositionSize >= MaxLotsTotal) return;
-
-            int volume = VolumeFixe > 0
-                ? VolumeFixe
-                : (int)Math.Max(1, Math.Round(msg.Volume * VolumeMultiplier));
-            volume = Math.Min(volume, MaxLotsParTrade);
-
-            var direction = msg.Direction == TradeDirection.Buy
-                ? OrderDirections.Buy
-                : OrderDirections.Sell;
-
-            if (EntreeParLimite)
+            _pendingOrders.Enqueue(() =>
             {
-                // Ordre limite dans la bande ± BandeEntreeTicks autour du prix maître
-                decimal limitPrice = (decimal)msg.Price;
-                PlaceLimitOrder(direction, volume, limitPrice, DureeVieOrdreS);
-            }
-            else
-            {
-                // Ordre market
-                PlaceMarketOrder(direction, volume);
-            }
+                if (!CanProcess) return;
 
-            // Le TP/SL sera posé dans OnMyTrade() dès la confirmation d'exécution
+                // Filtre spread
+                decimal tickSize = InstrumentInfo.TickSize;
+                decimal spread   = (Ask - Bid) / tickSize;
+                if (spread > MaxSpreadTicks)
+                {
+                    LogInfo($"[CLIENT] Spread trop large ({spread} ticks) — entrée annulée");
+                    return;
+                }
+
+                // Filtre position max
+                int positionActuelle = Math.Abs((int)(TradingManager?.Position ?? 0));
+                if (positionActuelle >= MaxLotsTotal)
+                {
+                    LogInfo($"[CLIENT] Position max atteinte ({positionActuelle}/{MaxLotsTotal}) — entrée annulée");
+                    return;
+                }
+
+                // Calcul volume
+                int volume = VolumeFixe > 0
+                    ? VolumeFixe
+                    : (int)Math.Max(1, Math.Round(msg.Volume * VolumeMultiplier));
+                volume = Math.Min(volume, MaxLotsParTrade);
+                volume = Math.Min(volume, MaxLotsTotal - positionActuelle);
+                if (volume <= 0) return;
+
+                var direction = msg.Direction == TradeDirection.Buy
+                    ? OrderDirections.Buy
+                    : OrderDirections.Sell;
+
+                if (EntreeParLimite)
+                {
+                    // Prix limite : prix maître ± bande
+                    decimal limitPrice = (decimal)msg.Price;
+                    limitPrice = ShrinkPrice(limitPrice); // alignement sur tick size
+                    PlacerLimite(direction, volume, limitPrice, DureeVieOrdreS);
+                }
+                else
+                {
+                    PlacerMarket(direction, volume);
+                }
+
+                _breakevenDone = false;
+                LogInfo($"[CLIENT] Ordre {direction} {volume} contrat(s) soumis");
+            });
         }
 
-        private void OnExecuteClose(TradingMessage msg)
+        private void OnSignalClose(TradingMessage msg)
         {
-            FlattenPositions("CLOSE_ALL reçu du maître");
+            // P0 — exécution immédiate, ne passe pas par _pendingOrders
+            // On force le flatten directement, thread-safe via ATAS
+            _pendingOrders.Enqueue(() =>
+            {
+                if (!CanProcess) return;
+                FlattenPositions("CLOSE_ALL reçu du maître");
+            });
         }
 
         private void OnConnectionLost(string reason)
         {
-            Console.WriteLine($"[CLIENT] Connexion perdue : {reason}");
+            LogWarn($"[CLIENT] Connexion relay perdue : {reason}");
             _connexionPerduTs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
 
@@ -306,79 +368,277 @@ namespace CopyTrading.ClientIndicator
         // TP / SL LOCAL — posé sur le prix RÉEL d'exécution du client
         // ────────────────────────────────────────────────────────────────
 
-        protected override void OnMyTrade(MyTrade trade)
+        protected override void OnMyTrade(MyTrade myTrade)
         {
-            if (TpTicks <= 0 && SlTicks <= 0) return;
+            // OnMyTrade peut être appelé depuis n'importe quel thread
+            // → on diffère la pose des ordres TP/SL dans _pendingOrders
 
-            decimal tickSize = InstrumentInfo.TickSize;
-            bool    isLong   = trade.Trade.Operation == TradeOperations.Buy;
+            var trade    = myTrade.Trade;
+            bool isEntry = trade.Operation == TradeOperations.Buy
+                        || trade.Operation == TradeOperations.Sell;
 
-            decimal entryPrice = trade.Trade.Price;
-            decimal tpPrice    = isLong
-                ? entryPrice + TpTicks    * tickSize
-                : entryPrice - TpTicks    * tickSize;
-            decimal slPrice    = isLong
-                ? entryPrice - SlTicks    * tickSize
-                : entryPrice + SlTicks    * tickSize;
+            if (!isEntry || (TpTicks <= 0 && SlTicks <= 0)) return;
 
-            var exitDir = isLong ? OrderDirections.Sell : OrderDirections.Buy;
-            int vol     = trade.Trade.Volume;
+            bool    isLong     = trade.Operation == TradeOperations.Buy;
+            decimal entryPrice = trade.Price;
+            int     volume     = trade.Volume;
 
-            // TP principal
-            if (TpTicks > 0)
+            _pendingOrders.Enqueue(() =>
             {
-                if (TpPartielPct > 0 && TpPartielTicks > 0)
+                if (!CanProcess) return;
+
+                decimal tickSize = InstrumentInfo.TickSize;
+                var exitDir = isLong ? OrderDirections.Sell : OrderDirections.Buy;
+
+                // TP principal
+                if (TpTicks > 0)
                 {
-                    // TP partiel niveau 1
-                    decimal tp1Price = isLong
-                        ? entryPrice + TpPartielTicks * tickSize
-                        : entryPrice - TpPartielTicks * tickSize;
-                    int vol1 = Math.Max(1, vol * TpPartielPct / 100);
-                    int vol2 = vol - vol1;
+                    decimal tpPrice = isLong
+                        ? entryPrice + TpTicks * tickSize
+                        : entryPrice - TpTicks * tickSize;
+                    tpPrice = ShrinkPrice(tpPrice);
 
-                    PlaceLimitOrder(exitDir, vol1, tp1Price);
-                    if (vol2 > 0 && TpTicks > TpPartielTicks)
-                        PlaceLimitOrder(exitDir, vol2, tpPrice);
+                    if (TpPartielPct > 0 && TpPartielTicks > 0 && volume > 1)
+                    {
+                        // TP partiel niveau 1
+                        decimal tp1Price = isLong
+                            ? entryPrice + TpPartielTicks * tickSize
+                            : entryPrice - TpPartielTicks * tickSize;
+                        tp1Price = ShrinkPrice(tp1Price);
+
+                        int vol1 = Math.Max(1, volume * TpPartielPct / 100);
+                        int vol2 = volume - vol1;
+
+                        PlacerLimite(exitDir, vol1, tp1Price);
+                        if (vol2 > 0)
+                            PlacerLimite(exitDir, vol2, tpPrice);
+                    }
+                    else
+                    {
+                        PlacerLimite(exitDir, volume, tpPrice);
+                    }
                 }
-                else
+
+                // SL
+                if (SlTicks > 0)
                 {
-                    PlaceLimitOrder(exitDir, vol, tpPrice);
+                    decimal slPrice = isLong
+                        ? entryPrice - SlTicks * tickSize
+                        : entryPrice + SlTicks * tickSize;
+                    slPrice = ShrinkPrice(slPrice);
+
+                    if (SlTrailing)
+                        PlacerTrailingStop(exitDir, volume, TrailingDistanceTicks * tickSize);
+                    else
+                        PlacerStop(exitDir, volume, slPrice);
                 }
-            }
 
-            // SL
-            if (SlTicks > 0)
-            {
-                if (SlTrailing)
-                    PlaceTrailingStop(exitDir, vol, TrailingDistanceTicks * tickSize);
-                else
-                    PlaceStopOrder(exitDir, vol, slPrice);
-            }
+                // Mémoriser le prix d'entrée pour le breakeven position
+                _breakevenActivatedAt = entryPrice;
+                _breakevenDone        = false;
 
-            // Breakeven position auto
-            if (BreakevenPositionTicks > 0)
+                // Mise à jour risk manager (trade ouvert)
+                var summary = _riskManager.GetSummary();
+                LogInfo($"[CLIENT] TP/SL posés — Risk: {summary.State} PnL: {summary.PnlJour:F2}$");
+            });
+        }
+
+        // Callback quand un trade est fermé (pour mettre à jour le risk manager)
+        protected override void OnPositionChanged(PositionEventArgs e)
+        {
+            if (e.PositionInfo == null) return;
+
+            // Quand la position revient à zéro → trade fermé
+            if (e.PositionInfo.Amount == 0 && TradingManager != null)
             {
-                // Géré via OnCalculate avec suivi du prix courant
+                double pnl = (double)TradingManager.RealizedPnl;
+                // Le risk manager est mis à jour via OnPnlUpdate dans OnCalculate
+                // mais on force ici la mise à jour du compteur de trades
+                _riskManager.OnPnlUpdate(pnl);
+                _breakevenDone = false;
             }
         }
 
         // ────────────────────────────────────────────────────────────────
-        // FLATTEN
+        // BREAKEVEN POSITION AUTO
         // ────────────────────────────────────────────────────────────────
+
+        private void CheckBreakevenPosition()
+        {
+            if (_breakevenActivatedAt == 0) return;
+
+            decimal tickSize = InstrumentInfo.TickSize;
+            decimal current  = GetCandle(CurrentBar - 1).Close;
+            bool    isLong   = TradingManager?.Position > 0;
+
+            decimal gainTicks = isLong
+                ? (current - _breakevenActivatedAt) / tickSize
+                : (_breakevenActivatedAt - current)  / tickSize;
+
+            if (gainTicks >= BreakevenPositionTicks)
+            {
+                // Déplace le SL au prix d'entrée (breakeven)
+                decimal bePrice = ShrinkPrice(_breakevenActivatedAt);
+                var exitDir     = isLong ? OrderDirections.Sell : OrderDirections.Buy;
+                int volume      = Math.Abs((int)(TradingManager?.Position ?? 0));
+
+                CancelOrders(); // annule l'ancien SL
+                PlacerStop(exitDir, volume, bePrice);
+
+                _breakevenDone = true;
+                LogInfo($"[CLIENT] Breakeven activé à {bePrice} ({gainTicks:F0} ticks de gain)");
+            }
+        }
+
+        // ────────────────────────────────────────────────────────────────
+        // PLACEMENT D'ORDRES — API ATAS réelle
+        // ────────────────────────────────────────────────────────────────
+
+        private void PlacerMarket(OrderDirections direction, int volume)
+        {
+            var order = new Order
+            {
+                Portfolio      = Portfolio,
+                Symbol         = Symbol,
+                Direction      = direction,
+                Type           = OrderType.Market,
+                QuantityToFill = volume,
+                Comment        = "CopyTrading"
+            };
+            OpenOrder(order);
+        }
+
+        private void PlacerLimite(OrderDirections direction, int volume, decimal price, int timeoutSec = 0)
+        {
+            var order = new Order
+            {
+                Portfolio      = Portfolio,
+                Symbol         = Symbol,
+                Direction      = direction,
+                Type           = OrderType.Limit,
+                Price          = price,
+                QuantityToFill = volume,
+                Comment        = "CopyTrading-TP"
+            };
+
+            if (timeoutSec > 0)
+            {
+                order.TimeInForce    = OrderTimeInForce.GTD;
+                order.ExpirationTime = DateTime.UtcNow.AddSeconds(timeoutSec);
+            }
+            else
+            {
+                order.TimeInForce = OrderTimeInForce.GTC;
+            }
+
+            OpenOrder(order);
+        }
+
+        private void PlacerStop(OrderDirections direction, int volume, decimal triggerPrice)
+        {
+            var order = new Order
+            {
+                Portfolio      = Portfolio,
+                Symbol         = Symbol,
+                Direction      = direction,
+                Type           = OrderType.Stop,
+                TriggerPrice   = triggerPrice,
+                QuantityToFill = volume,
+                TimeInForce    = OrderTimeInForce.GTC,
+                Comment        = "CopyTrading-SL"
+            };
+            OpenOrder(order);
+        }
+
+        private void PlacerTrailingStop(OrderDirections direction, int volume, decimal trailDistance)
+        {
+            // ATAS supporte le trailing stop via OrderType.TrailingStop
+            var order = new Order
+            {
+                Portfolio      = Portfolio,
+                Symbol         = Symbol,
+                Direction      = direction,
+                Type           = OrderType.TrailingStop,
+                TriggerPrice   = trailDistance, // distance en valeur absolue
+                QuantityToFill = volume,
+                TimeInForce    = OrderTimeInForce.GTC,
+                Comment        = "CopyTrading-Trail"
+            };
+            OpenOrder(order);
+        }
 
         private void FlattenPositions(string reason)
         {
-            Console.WriteLine($"[CLIENT] Flatten : {reason}");
-            CloseAllPositions();
+            LogWarn($"[CLIENT] Flatten : {reason}");
+            CancelOrders();
+            ClosePositions();
+
             if (FlattenAuStopJour && !RepriseAutoCopie)
                 CopieActive = false;
+        }
+
+        // Ferme toutes les positions ouvertes (méthode ATAS native)
+        private void ClosePositions()
+        {
+            if (TradingManager == null || TradingManager.Position == 0) return;
+
+            bool    isLong   = TradingManager.Position > 0;
+            int     volume   = Math.Abs((int)TradingManager.Position);
+            var     exitDir  = isLong ? OrderDirections.Sell : OrderDirections.Buy;
+
+            var order = new Order
+            {
+                Portfolio           = Portfolio,
+                Symbol              = Symbol,
+                Direction           = exitDir,
+                Type                = OrderType.Market,
+                QuantityToFill      = volume,
+                ReduceOnly          = true,  // "Réduction uniquement" — ne crée pas de nouvelle position
+                Comment             = "CopyTrading-FlatAll"
+            };
+            OpenOrder(order);
+        }
+
+        // Annule tous les ordres actifs (SL, TP en attente)
+        private void CancelOrders()
+        {
+            if (TradingManager == null) return;
+
+            foreach (var order in TradingManager.Orders)
+            {
+                if (order.OrderState == OrderStates.Active ||
+                    order.OrderState == OrderStates.PartiallyFilled)
+                {
+                    CancelOrder(order);
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────────────────────
+        // ÉVÉNEMENTS ORDRES — gestion des erreurs
+        // ────────────────────────────────────────────────────────────────
+
+        protected override void OnOrderChanged(Order order)
+        {
+            if (order.OrderState == OrderStates.Rejected)
+                LogError($"[CLIENT] Ordre rejeté : {order.Comment} | Raison : {order.Comment}");
+        }
+
+        protected override void OnOrderRegisterFailed(Order order)
+        {
+            LogError($"[CLIENT] Échec enregistrement ordre : {order.Direction} {order.Type} vol={order.QuantityToFill}");
+        }
+
+        protected override void OnOrderModifyFailed(Order order)
+        {
+            LogError($"[CLIENT] Échec modification ordre : {order.Id}");
         }
 
         // ────────────────────────────────────────────────────────────────
         // RENDU OVERLAY ATAS
         // ────────────────────────────────────────────────────────────────
 
-        public override void OnRender(RenderContext context, DrawingLayouts layout)
+        protected override void OnRender(RenderContext context, DrawingLayouts layout)
         {
             if (!PanneauVisible || layout != DrawingLayouts.Final) return;
 
@@ -387,65 +647,67 @@ namespace CopyTrading.ClientIndicator
             bool comm    = _commEngine?.IsConnected    ?? false;
             long latency = _commEngine?.LatencyMs      ?? 0;
 
-            int x = 20, y = 40;
+            int x  = 20;
+            int y  = 40;
             int lh = TaillePolice + 6;
 
-            // Statut connexion
+            var font     = new RenderFont("Courier New", TaillePolice);
+            var fontBold = new RenderFont("Courier New", TaillePolice, System.Drawing.FontStyle.Bold);
+
+            // Ligne 1 — connexion
             var connColor = trading ? System.Drawing.Color.LimeGreen : System.Drawing.Color.Red;
-            context.DrawString($"[COPY] Trading: {(trading ? "OK" : "OFF")}  Comm: {(comm ? "OK" : "OFF")}  Latence: {latency}ms",
-                new System.Drawing.Font("Arial", TaillePolice), connColor, x, y);
+            context.DrawString(
+                $"COPY  Trading:{(trading ? "OK" : "OFF")}  Comm:{(comm ? "OK" : "OFF")}  Lat:{latency}ms",
+                font, connColor, x, y);
             y += lh;
 
             if (summary != null)
             {
-                // État risk manager
-                var stateColor = summary.PeutEntrer ? System.Drawing.Color.LimeGreen : System.Drawing.Color.Orange;
-                context.DrawString($"Risk: {summary.State}  PnL jour: {summary.PnlJour:F2}$",
-                    new System.Drawing.Font("Arial", TaillePolice), stateColor, x, y);
+                // Ligne 2 — risk manager
+                var stateColor = summary.PeutEntrer
+                    ? System.Drawing.Color.LimeGreen
+                    : System.Drawing.Color.Orange;
+                string pnlStr = $"{(summary.PnlJour >= 0 ? "+" : "")}{summary.PnlJour:F2}$";
+                context.DrawString(
+                    $"Risk:{summary.State,-18} PnL:{pnlStr}",
+                    font, stateColor, x, y);
                 y += lh;
 
-                context.DrawString($"Trades: {summary.TradesJour}  Wins: {summary.WinsJour}  Losses consec: {summary.ConsecLosses}",
-                    new System.Drawing.Font("Arial", TaillePolice), System.Drawing.Color.White, x, y);
+                // Ligne 3 — stats trades
+                context.DrawString(
+                    $"Trades:{summary.TradesJour}  Wins:{summary.WinsJour}  ConsecLoss:{summary.ConsecLosses}",
+                    font, System.Drawing.Color.White, x, y);
                 y += lh;
+
+                // Ligne 4 — position courante
+                if (TradingManager != null)
+                {
+                    decimal pos       = TradingManager.Position;
+                    string  posStr    = pos == 0 ? "FLAT" : pos > 0 ? $"LONG {pos}" : $"SHORT {Math.Abs(pos)}";
+                    var     posColor  = pos > 0
+                        ? System.Drawing.Color.LimeGreen
+                        : pos < 0
+                            ? System.Drawing.Color.Red
+                            : System.Drawing.Color.Gray;
+                    context.DrawString($"Position : {posStr}", fontBold, posColor, x, y);
+                    y += lh;
+                }
             }
 
-            // Message dashboard (bannière)
-            if (AfficherMessagesRelay && !string.IsNullOrEmpty(_dashboardMessage)
+            // Bannière message dashboard
+            if (AfficherMessagesRelay
+                && !string.IsNullOrEmpty(_dashboardMessage)
                 && DateTime.UtcNow < _dashboardMessageExp)
             {
-                context.DrawString($"[MARCUS] {_dashboardMessage}",
-                    new System.Drawing.Font("Arial", TaillePolice, System.Drawing.FontStyle.Bold),
-                    System.Drawing.Color.Yellow, x, y);
+                context.DrawString(
+                    $"[MSG] {_dashboardMessage}",
+                    fontBold, System.Drawing.Color.Yellow, x, y);
             }
         }
 
-        // ────────────────────────────────────────────────────────────────
-        // STUBS API ATAS (à adapter selon la version réelle de l'API)
-        // ────────────────────────────────────────────────────────────────
-
-        private void PlaceMarketOrder(OrderDirections direction, int volume)
+        protected override void OnCalculate(int bar, decimal value)
         {
-            // TradingManager.PlaceOrderAsync(new OrderModel { ... })
-        }
-
-        private void PlaceLimitOrder(OrderDirections direction, int volume, decimal price, int timeoutSec = 0)
-        {
-            // TradingManager.PlaceOrderAsync(new OrderModel { Type = OrderType.Limit, ... })
-        }
-
-        private void PlaceStopOrder(OrderDirections direction, int volume, decimal price)
-        {
-            // TradingManager.PlaceOrderAsync(new OrderModel { Type = OrderType.Stop, ... })
-        }
-
-        private void PlaceTrailingStop(OrderDirections direction, int volume, decimal trailDistance)
-        {
-            // TradingManager.PlaceOrderAsync(new OrderModel { Type = OrderType.TrailingStop, ... })
-        }
-
-        private void CloseAllPositions()
-        {
-            // TradingManager.CloseAllPositionsAsync()
+            // OnCalculate de ChartStrategy — requis
         }
     }
 }
