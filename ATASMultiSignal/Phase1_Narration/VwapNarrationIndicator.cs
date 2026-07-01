@@ -22,17 +22,17 @@ namespace ATASMultiSignal.Phase1_Narration
         [Parameter][Display(Name = "Indicateur ID", GroupName = "Communication")] public string IndicatorId { get; set; } = "VwapNarration";
 
         // Series
-        private readonly ValueDataSeries _vwap = new("VWAP") { Color = Colors.White, Width = 2 };
-        private readonly ValueDataSeries _sd1Up = new("SD+1") { Color = Colors.DodgerBlue, Width = 1, LineDashStyle = LineDashStyle.Dash };
-        private readonly ValueDataSeries _sd1Dn = new("SD-1") { Color = Colors.DodgerBlue, Width = 1, LineDashStyle = LineDashStyle.Dash };
-        private readonly ValueDataSeries _sd2Up = new("SD+2") { Color = Colors.Orange, Width = 1, LineDashStyle = LineDashStyle.Dash };
-        private readonly ValueDataSeries _sd2Dn = new("SD-2") { Color = Colors.Orange, Width = 1, LineDashStyle = LineDashStyle.Dash };
-        private readonly ValueDataSeries _sd3Up = new("SD+3") { Color = Colors.Red, Width = 1, LineDashStyle = LineDashStyle.Dot };
-        private readonly ValueDataSeries _sd3Dn = new("SD-3") { Color = Colors.Red, Width = 1, LineDashStyle = LineDashStyle.Dot };
-        private readonly ValueDataSeries _sd4Up = new("SD+4") { Color = Colors.Magenta, Width = 1, LineDashStyle = LineDashStyle.Dot };
-        private readonly ValueDataSeries _sd4Dn = new("SD-4") { Color = Colors.Magenta, Width = 1, LineDashStyle = LineDashStyle.Dot };
-        private readonly ValueDataSeries _sd5Up = new("SD+5") { Color = Colors.DarkRed, Width = 1, LineDashStyle = LineDashStyle.Dot };
-        private readonly ValueDataSeries _sd5Dn = new("SD-5") { Color = Colors.DarkRed, Width = 1, LineDashStyle = LineDashStyle.Dot };
+        private readonly ValueDataSeries _vwap = new("VWAP") { Color = System.Drawing.Color.White, Width = 2 };
+        private readonly ValueDataSeries _sd1Up = new("SD+1") { Color = System.Drawing.Color.DodgerBlue, Width = 1 };
+        private readonly ValueDataSeries _sd1Dn = new("SD-1") { Color = System.Drawing.Color.DodgerBlue, Width = 1 };
+        private readonly ValueDataSeries _sd2Up = new("SD+2") { Color = System.Drawing.Color.Orange, Width = 1 };
+        private readonly ValueDataSeries _sd2Dn = new("SD-2") { Color = System.Drawing.Color.Orange, Width = 1 };
+        private readonly ValueDataSeries _sd3Up = new("SD+3") { Color = System.Drawing.Color.Red, Width = 1 };
+        private readonly ValueDataSeries _sd3Dn = new("SD-3") { Color = System.Drawing.Color.Red, Width = 1 };
+        private readonly ValueDataSeries _sd4Up = new("SD+4") { Color = System.Drawing.Color.Magenta, Width = 1 };
+        private readonly ValueDataSeries _sd4Dn = new("SD-4") { Color = System.Drawing.Color.Magenta, Width = 1 };
+        private readonly ValueDataSeries _sd5Up = new("SD+5") { Color = System.Drawing.Color.DarkRed, Width = 1 };
+        private readonly ValueDataSeries _sd5Dn = new("SD-5") { Color = System.Drawing.Color.DarkRed, Width = 1 };
 
         // Calcul VWAP
         private double _cumVolumePrice;

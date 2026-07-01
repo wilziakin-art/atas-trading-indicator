@@ -16,10 +16,10 @@ namespace ATASMultiSignal.Phase2_Confirmation
         [Parameter][Display(Name = "CCI Période", GroupName = "CCI")] public int CciPeriod { get; set; } = 10;
         [Parameter][Display(Name = "Indicateur ID", GroupName = "Communication")] public string IndicatorId { get; set; } = "MacdCciConfirm";
 
-        private readonly ValueDataSeries _macdHist = new("MACD Histo") { Color = Colors.DodgerBlue, Width = 2 };
-        private readonly ValueDataSeries _cci = new("CCI") { Color = Colors.Yellow, Width = 1 };
-        private readonly ValueDataSeries _macdLine = new("MACD") { Color = Colors.Cyan, Width = 1 };
-        private readonly ValueDataSeries _signal = new("Signal") { Color = Colors.Red, Width = 1 };
+        private readonly ValueDataSeries _macdHist = new("MACD Histo") { Color = System.Drawing.Color.DodgerBlue, Width = 2 };
+        private readonly ValueDataSeries _cci = new("CCI") { Color = System.Drawing.Color.Yellow, Width = 1 };
+        private readonly ValueDataSeries _macdLine = new("MACD") { Color = System.Drawing.Color.Cyan, Width = 1 };
+        private readonly ValueDataSeries _signal = new("Signal") { Color = System.Drawing.Color.Red, Width = 1 };
 
         private double _emaF, _emaS, _emaSig;
         private bool _init;

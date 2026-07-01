@@ -26,9 +26,9 @@ namespace ATASMultiSignal.Phase3_Execution
         [Parameter][Display(Name = "Score min Phase 2 (/4)", GroupName = "Filtres")] public int MinPhase2Score { get; set; } = 3;
 
         // Flèches de signal
-        private readonly ValueDataSeries _signalUp = new("Signal UP") { Color = Colors.Lime, Width = 3, ShowZeroValue = false };
-        private readonly ValueDataSeries _signalDown = new("Signal DOWN") { Color = Colors.Red, Width = 3, ShowZeroValue = false };
-        private readonly ValueDataSeries _scoreDisplay = new("Score") { Color = Colors.Yellow, Width = 1 };
+        private readonly ValueDataSeries _signalUp = new("Signal UP") { Color = System.Drawing.Color.Lime, Width = 3, ShowZeroValue = false };
+        private readonly ValueDataSeries _signalDown = new("Signal DOWN") { Color = System.Drawing.Color.Red, Width = 3, ShowZeroValue = false };
+        private readonly ValueDataSeries _scoreDisplay = new("Score") { Color = System.Drawing.Color.Yellow, Width = 1 };
 
         private string _lastSignal = "Neutral";
         private double _lastScore = 0;
@@ -119,14 +119,14 @@ namespace ATASMultiSignal.Phase3_Execution
 
             // Panneau de score en haut à gauche
             var font = new RenderFont("Arial", 11);
-            var colorSignal = _lastSignal == "Bull" ? Colors.Lime : (_lastSignal == "Bear" ? Colors.Red : Colors.Gray);
+            var colorSignal = _lastSignal == "Bull" ? System.Drawing.Color.Lime : (_lastSignal == "Bear" ? System.Drawing.Color.Red : System.Drawing.Color.Gray);
             var bg = Color.FromArgb(180, 0, 0, 0);
 
             int x = 10, y = 10;
             context.FillRectangle(bg, new System.Drawing.Rectangle(x - 5, y - 5, 300, 70));
             context.DrawString($"EMI Signal : {_lastSignal}", font, colorSignal, x, y);
-            context.DrawString($"Score : {_lastScore:P0}", font, Colors.White, x, y + 18);
-            context.DrawString(_lastDetails, new RenderFont("Arial", 9), Colors.LightGray, x, y + 36);
+            context.DrawString($"Score : {_lastScore:P0}", font, System.Drawing.Color.White, x, y + 18);
+            context.DrawString(_lastDetails, new RenderFont("Arial", 9), System.Drawing.Color.LightGray, x, y + 36);
         }
     }
 }

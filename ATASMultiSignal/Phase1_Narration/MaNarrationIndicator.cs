@@ -15,9 +15,9 @@ namespace ATASMultiSignal.Phase1_Narration
         [Parameter][Display(Name = "EMA Lente", GroupName = "Paramètres")] public int SlowPeriod { get; set; } = 135;
         [Parameter][Display(Name = "Indicateur ID", GroupName = "Communication")] public string IndicatorId { get; set; } = "MaNarration_NQ";
 
-        private readonly ValueDataSeries _emaFast = new("EMA9") { Color = Colors.Lime, Width = 1 };
-        private readonly ValueDataSeries _emaMid = new("EMA45") { Color = Colors.Yellow, Width = 2 };
-        private readonly ValueDataSeries _emaSlow = new("EMA135") { Color = Colors.Red, Width = 2 };
+        private readonly ValueDataSeries _emaFast = new("EMA9") { Color = System.Drawing.Color.Lime, Width = 1 };
+        private readonly ValueDataSeries _emaMid = new("EMA45") { Color = System.Drawing.Color.Yellow, Width = 2 };
+        private readonly ValueDataSeries _emaSlow = new("EMA135") { Color = System.Drawing.Color.Red, Width = 2 };
 
         private double _eFast, _eMid, _eSlow;
         private bool _initialized;

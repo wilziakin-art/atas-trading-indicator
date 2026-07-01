@@ -13,9 +13,9 @@ namespace ATASMultiSignal.Phase2_Confirmation
         [Parameter][Display(Name = "Imbalance Ratio (x)", GroupName = "Footprint")] public double ImbalanceRatio { get; set; } = 3.0;
         [Parameter][Display(Name = "Indicateur ID", GroupName = "Communication")] public string IndicatorId { get; set; } = "FootprintConfirm";
 
-        private readonly ValueDataSeries _delta = new("Delta") { Color = Colors.Cyan, Width = 2 };
-        private readonly ValueDataSeries _deltaChange = new("Delta Change") { Color = Colors.Yellow, Width = 1 };
-        private readonly ValueDataSeries _volume = new("Volume") { Color = Colors.Gray, Width = 1 };
+        private readonly ValueDataSeries _delta = new("Delta") { Color = System.Drawing.Color.Cyan, Width = 2 };
+        private readonly ValueDataSeries _deltaChange = new("Delta Change") { Color = System.Drawing.Color.Yellow, Width = 1 };
+        private readonly ValueDataSeries _volume = new("Volume") { Color = System.Drawing.Color.Gray, Width = 1 };
 
         private double _prevDelta;
 

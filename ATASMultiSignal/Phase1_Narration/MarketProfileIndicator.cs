@@ -13,9 +13,9 @@ namespace ATASMultiSignal.Phase1_Narration
         [Parameter][Display(Name = "Value Area %", GroupName = "Paramètres")] public double ValueAreaPercent { get; set; } = 70.0;
         [Parameter][Display(Name = "Indicateur ID", GroupName = "Communication")] public string IndicatorId { get; set; } = "MarketProfile";
 
-        private readonly ValueDataSeries _poc = new("POC") { Color = Colors.Yellow, Width = 2, LineDashStyle = LineDashStyle.Dash };
-        private readonly ValueDataSeries _vah = new("VAH") { Color = Colors.Cyan, Width = 1, LineDashStyle = LineDashStyle.Dot };
-        private readonly ValueDataSeries _val = new("VAL") { Color = Colors.Cyan, Width = 1, LineDashStyle = LineDashStyle.Dot };
+        private readonly ValueDataSeries _poc = new("POC") { Color = System.Drawing.Color.Yellow, Width = 2 };
+        private readonly ValueDataSeries _vah = new("VAH") { Color = System.Drawing.Color.Cyan, Width = 1 };
+        private readonly ValueDataSeries _val = new("VAL") { Color = System.Drawing.Color.Cyan, Width = 1 };
 
         // État session
         private double _sessionPoc, _sessionVah, _sessionVal;

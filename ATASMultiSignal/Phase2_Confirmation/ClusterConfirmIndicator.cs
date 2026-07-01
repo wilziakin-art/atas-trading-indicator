@@ -14,8 +14,8 @@ namespace ATASMultiSignal.Phase2_Confirmation
         [Parameter][Display(Name = "Stack min (niveaux)", GroupName = "Paramètres")] public int StackMinLevels { get; set; } = 2;
         [Parameter][Display(Name = "Indicateur ID", GroupName = "Communication")] public string IndicatorId { get; set; } = "ClusterConfirm";
 
-        private readonly ValueDataSeries _imbalanceScore = new("ImbalanceScore") { Color = Colors.Yellow, Width = 2 };
-        private readonly ValueDataSeries _delta = new("Delta") { Color = Colors.Cyan, Width = 1 };
+        private readonly ValueDataSeries _imbalanceScore = new("ImbalanceScore") { Color = System.Drawing.Color.Yellow, Width = 2 };
+        private readonly ValueDataSeries _delta = new("Delta") { Color = System.Drawing.Color.Cyan, Width = 1 };
 
         public ClusterConfirmIndicator() : base(true)
         {

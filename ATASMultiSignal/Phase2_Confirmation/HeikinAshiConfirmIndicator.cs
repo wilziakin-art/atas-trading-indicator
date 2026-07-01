@@ -25,11 +25,11 @@ namespace ATASMultiSignal.Phase2_Confirmation
         [Parameter][Display(Name = "Indicateur ID", GroupName = "Communication")] public string IndicatorId { get; set; } = "HeikinAshiConfirm";
 
         // Series
-        private readonly ValueDataSeries _macdLine = new("MACD") { Color = Colors.Cyan, Width = 1 };
-        private readonly ValueDataSeries _signalLine = new("Signal") { Color = Colors.Red, Width = 1 };
-        private readonly ValueDataSeries _histogram = new("Histogram") { Color = Colors.DodgerBlue, Width = 2 };
-        private readonly ValueDataSeries _stc = new("STC") { Color = Colors.Yellow, Width = 2 };
-        private readonly ValueDataSeries _cvd = new("CVD") { Color = Colors.Lime, Width = 1 };
+        private readonly ValueDataSeries _macdLine = new("MACD") { Color = System.Drawing.Color.Cyan, Width = 1 };
+        private readonly ValueDataSeries _signalLine = new("Signal") { Color = System.Drawing.Color.Red, Width = 1 };
+        private readonly ValueDataSeries _histogram = new("Histogram") { Color = System.Drawing.Color.DodgerBlue, Width = 2 };
+        private readonly ValueDataSeries _stc = new("STC") { Color = System.Drawing.Color.Yellow, Width = 2 };
+        private readonly ValueDataSeries _cvd = new("CVD") { Color = System.Drawing.Color.Lime, Width = 1 };
 
         // EMA state
         private double _emaFast, _emaSlow, _emaSignal;
